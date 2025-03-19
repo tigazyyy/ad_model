@@ -31,20 +31,34 @@ class Config:
         # 交叉路口检测配置
         self.junction_detection = {
             "distance_threshold": 20.0,  # 检测交叉路口的距离阈值
+            "stop_distance": 5.0,        # 停车距离
+            "wait_time": 2.0,            # 等待时间(秒)
         }
         
         # 大模型配置
         self.model = {
             "type": "ollama",
             "model_name": "car",
-            "timeout": 30.0
+            "timeout": 30.0,
+            "prompt_template": {
+                "junction_detection": "请分析这张图片，判断是否接近交叉路口。如果是，请返回JSON格式：{\"is_junction\": true, \"direction\": \"left/right/straight\", \"confidence\": 0.0-1.0}",
+                "junction_decision": "基于当前场景，请决定车辆应该采取的行动。返回JSON格式：{\"direction\": \"左转/右转/直行\", \"reason\": \"原因说明\", \"confidence\": 0.0-1.0, \"estimated_time\": 5, \"safety_assessment\": \"安全/谨慎/危险\"}"
+            },
+            "junction": {
+                "stop_time": 2.0,        # 在交叉路口停止的时间(秒)
+                "query_timeout": 10.0,   # 查询模型的超时时间(秒)
+                "max_retry": 3,          # 最大重试次数
+                "default_direction": "直行"  # 默认方向
+            }
         }
         
         # 可视化配置
         self.visualization = {
             "enable_debug": True,
             "window_width": 1280,
-            "window_height": 720
+            "window_height": 720,
+            "show_trajectory": True,
+            "show_mpc_prediction": True
         }
         
         # MPC控制器配置
@@ -57,21 +71,26 @@ class Config:
             "max_steer_rate": 0.5,    # 最大转向角速度 (rad/s)
             "max_steer": 30.0,        # 最大转向角 (度)
             "target_speed": 20.0,     # 目标速度 (km/h)
-            "lookahead_distance": 5.0 # 前视距离 (m)
+            "lookahead_distance": 5.0, # 前视距离 (m)
+            "junction_speed": 10.0,    # 通过路口时的速度 (km/h)
+            "safety_margin": 2.0       # 安全边距 (m)
         }
         
         # 交叉路口轨迹配置
         self.junction_trajectory = {
             "left_turn": {
                 "points": [(0, 0), (2, 0), (5, 2), (8, 5), (10, 8), (12, 10)],
-                "speed": 15.0  # km/h
+                "speed": 15.0,  # km/h
+                "radius": 8.0   # 转弯半径 (m)
             },
             "right_turn": {
                 "points": [(0, 0), (2, 0), (5, -2), (8, -5), (10, -8), (12, -10)],
-                "speed": 15.0  # km/h
+                "speed": 15.0,  # km/h
+                "radius": 8.0   # 转弯半径 (m)
             },
             "straight": {
                 "points": [(0, 0), (3, 0), (6, 0), (9, 0), (12, 0), (15, 0)],
-                "speed": 20.0  # km/h
+                "speed": 20.0,  # km/h
+                "radius": 1000.0  # 近似直线
             }
         }

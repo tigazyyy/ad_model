@@ -4,6 +4,7 @@ import math
 import carla
 import matplotlib.pyplot as plt
 from scipy.interpolate import splprep, splev
+import traceback
 
 class MPCController:
     """模型预测控制器，用于在交叉路口生成轨迹"""
@@ -44,6 +45,11 @@ class MPCController:
             'right': self._create_right_turn_template(),
             'straight': self._create_straight_template()
         }
+        
+        # 增加调试标志
+        self.debug = True
+        
+        print("MPC控制器初始化完成")
     
     def _create_left_turn_template(self):
         """创建左转轨迹模板"""
@@ -66,118 +72,193 @@ class MPCController:
         y = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         return np.column_stack((x, y))
     
-    def generate_junction_trajectory(self, vehicle, direction, junction_center=None):
-        """生成交叉路口轨迹
+    def generate_junction_trajectory(self, vehicle, direction='straight'):
+        """生成交叉路口轨迹"""
+        try:
+            vehicle_transform = vehicle.get_transform()
+            vehicle_location = vehicle_transform.location
+            vehicle_rotation = vehicle_transform.rotation
+            
+            # 获取车辆的前向向量和右向向量
+            forward_vector = vehicle_transform.get_forward_vector()
+            right_vector = vehicle_transform.get_right_vector()
+            
+            # 根据方向选择轨迹模板
+            if direction == 'left':
+                template = self.junction_templates['left']
+            elif direction == 'right':
+                template = self.junction_templates['right']
+            else:  # straight
+                template = self.junction_templates['straight']
+            
+            # 生成实际轨迹点
+            trajectory_points = []
+            
+            # 转换模板点到全局坐标系
+            for point in template:
+                # 计算全局坐标
+                x = vehicle_location.x + forward_vector.x * point[0] + right_vector.x * point[1]
+                y = vehicle_location.y + forward_vector.y * point[0] + right_vector.y * point[1]
+                
+                # 计算朝向角度
+                if direction == 'left':
+                    yaw = vehicle_rotation.yaw - (point[0] / template[-1][0]) * 90
+                elif direction == 'right':
+                    yaw = vehicle_rotation.yaw + (point[0] / template[-1][0]) * 90
+                else:
+                    yaw = vehicle_rotation.yaw
+                
+                # 计算目标速度（转弯时降低速度）
+                if direction in ['left', 'right']:
+                    target_speed = max(5.0, self.target_speed * (1.0 - 0.5 * (point[0] / template[-1][0])))
+                else:
+                    target_speed = self.target_speed
+                
+                trajectory_points.append((x, y, yaw, target_speed))
+            
+            # 使用样条插值平滑轨迹
+            if len(trajectory_points) >= 4:
+                x = [p[0] for p in trajectory_points]
+                y = [p[1] for p in trajectory_points]
+                yaw = [p[2] for p in trajectory_points]
+                speed = [p[3] for p in trajectory_points]
+                
+                # 生成参数化的样条曲线
+                tck, u = splprep([x, y], s=0.1, k=3)
+                u_new = np.linspace(0, 1, num=50)
+                x_new, y_new = splev(u_new, tck)
+                
+                # 重新生成平滑的轨迹点
+                smooth_trajectory = []
+                for i in range(len(x_new)):
+                    # 插值计算朝向和速度
+                    t = i / (len(x_new) - 1)
+                    yaw_interp = np.interp(t, np.linspace(0, 1, len(yaw)), yaw)
+                    speed_interp = np.interp(t, np.linspace(0, 1, len(speed)), speed)
+                    smooth_trajectory.append((x_new[i], y_new[i], yaw_interp, speed_interp))
+                
+                trajectory_points = smooth_trajectory
+            
+            # 保存轨迹
+            self.trajectory = trajectory_points
+            self.current_trajectory_index = 0
+            self.trajectory_completed = False
+            
+            print(f"【MPC】已生成{direction}转轨迹，共{len(trajectory_points)}个点")
+            return trajectory_points
+            
+        except Exception as e:
+            print(f"生成交叉路口轨迹失败: {e}")
+            traceback.print_exc()
+            return None
+    
+    def generate_explicit_right_turn(self, vehicle):
+        """强制生成确定的右转轨迹
         
         Args:
             vehicle: 车辆对象
-            direction: 方向 ('left', 'right', 'straight')
-            junction_center: 交叉路口中心点 (可选)
             
         Returns:
-            生成的轨迹点列表 [(x, y, yaw, speed), ...]
+            trajectory: 生成的轨迹点列表
         """
-        # 获取车辆当前状态
-        vehicle_transform = vehicle.get_transform()
-        vehicle_location = vehicle_transform.location
-        vehicle_rotation = vehicle_transform.rotation
-        vehicle_yaw = np.deg2rad(vehicle_rotation.yaw)
-        vehicle_speed = vehicle.get_velocity()
-        vehicle_speed_scalar = np.sqrt(vehicle_speed.x**2 + vehicle_speed.y**2 + vehicle_speed.z**2)
-        
-        # 确保初始速度不为零
-        if vehicle_speed_scalar < 0.1:
-            vehicle_speed_scalar = 2.0  # 默认初始速度为2m/s (约7.2km/h)
-        
-        # 如果没有提供交叉路口中心点，使用前方较近的距离作为参考点
-        if junction_center is None:
+        try:
+            print("【MPC】强制生成明确的右转轨迹")
+            
+            # 获取车辆当前状态
+            vehicle_location = vehicle.get_location()
+            vehicle_transform = vehicle.get_transform()
+            vehicle_rotation = vehicle_transform.rotation
+            yaw_rad = math.radians(vehicle_rotation.yaw)
+            
+            # 获取车辆的前向向量和右向向量
             forward_vector = vehicle_transform.get_forward_vector()
-            junction_center = carla.Location(
-                x=vehicle_location.x + forward_vector.x * 10,  # 减少距离到10米
-                y=vehicle_location.y + forward_vector.y * 10,
-                z=vehicle_location.z
-            )
-        
-        # 获取轨迹模板
-        template = self.junction_templates[direction]
-        
-        # 将模板转换为全局坐标
-        cos_yaw = np.cos(vehicle_yaw)
-        sin_yaw = np.sin(vehicle_yaw)
-        
-        global_trajectory = []
-        for point in template:
-            # 旋转并平移到车辆坐标系
-            x_global = point[0] * cos_yaw - point[1] * sin_yaw + vehicle_location.x
-            y_global = point[0] * sin_yaw + point[1] * cos_yaw + vehicle_location.y
+            right_vector = vehicle_transform.get_right_vector()
             
-            # 计算该点的航向角 (简化处理，实际应根据轨迹曲率计算)
-            if len(global_trajectory) > 0:
-                prev_x, prev_y = global_trajectory[-1][0], global_trajectory[-1][1]
-                yaw = np.arctan2(y_global - prev_y, x_global - prev_x)
-            else:
-                yaw = vehicle_yaw
+            # 右转轨迹参数
+            trajectory_length = 30  # 轨迹总长度
+            turning_start = 8       # 从这个距离开始转弯
+            straight_speed = 10.0   # 直行速度 (km/h)
+            turn_speed = 8.0        # 转弯速度 (km/h)
+            arc_radius = 6.0        # 转弯半径 - 较小半径，更显著的右转
             
-            # 计算该点的速度 (简化处理，实际应根据曲率调整)
-            # 起始点使用当前速度，然后逐渐增加到目标速度
-            if len(global_trajectory) == 0:
-                speed = vehicle_speed_scalar
-            else:
-                # 逐渐增加速度，但不超过目标速度
-                prev_speed = global_trajectory[-1][3]
-                speed = min(prev_speed + 0.5, self.target_speed)  # 每个点最多增加0.5m/s
+            # 轨迹模板 - 右转时保持在车辆右侧
+            trajectory_template = []
             
-            global_trajectory.append((x_global, y_global, yaw, speed))
-        
-        # 使用样条插值生成更平滑的轨迹
-        if len(global_trajectory) > 3:
-            x = [p[0] for p in global_trajectory]
-            y = [p[1] for p in global_trajectory]
+            # 计算弧形路径中心点 - 确保在车辆右侧
+            # 使用正的右向量表示右侧方向
+            arc_center_x = vehicle_location.x + forward_vector.x * turning_start + right_vector.x * arc_radius
+            arc_center_y = vehicle_location.y + forward_vector.y * turning_start + right_vector.y * arc_radius
             
-            # 样条插值
-            tck, u = splprep([x, y], s=0, k=3)
-            u_new = np.linspace(0, 1, 50)  # 生成50个点
-            x_new, y_new = splev(u_new, tck)
+            print(f"【MPC右转】弧形中心点: ({arc_center_x:.2f}, {arc_center_y:.2f})")
+            print(f"【MPC右转】车辆位置: ({vehicle_location.x:.2f}, {vehicle_location.y:.2f})")
+            print(f"【MPC右转】车辆朝向: {vehicle_rotation.yaw:.2f}度")
             
-            # 计算新轨迹点的航向角和速度
-            smooth_trajectory = []
-            for i in range(len(x_new)):
-                if i > 0:
-                    yaw = np.arctan2(y_new[i] - y_new[i-1], x_new[i] - x_new[i-1])
-                else:
-                    yaw = vehicle_yaw
+            # 创建更明确的右转轨迹
+            for i in range(trajectory_length):
+                progress = i / trajectory_length
+                distance = i * 1.0  # 每个点间隔1米
                 
-                # 根据曲率调整速度
-                if i > 0 and i < len(x_new) - 1:
-                    # 简单的曲率计算 (三点法)
-                    dx1 = x_new[i] - x_new[i-1]
-                    dy1 = y_new[i] - y_new[i-1]
-                    dx2 = x_new[i+1] - x_new[i]
-                    dy2 = y_new[i+1] - y_new[i]
-                    
-                    # 计算方向变化
-                    angle1 = np.arctan2(dy1, dx1)
-                    angle2 = np.arctan2(dy2, dx2)
-                    angle_diff = abs(angle2 - angle1)
-                    while angle_diff > np.pi:
-                        angle_diff = 2 * np.pi - angle_diff
-                    
-                    # 根据角度变化调整速度
-                    speed = self.target_speed * (1 - 0.5 * angle_diff / np.pi)
-                    speed = max(5.0 / 3.6, speed)  # 最低速度5km/h
+                if distance < turning_start:
+                    # 直行段 - 使用前向向量
+                    x = vehicle_location.x + distance * forward_vector.x
+                    y = vehicle_location.y + distance * forward_vector.y
+                    heading = vehicle_rotation.yaw
+                    target_speed = straight_speed
                 else:
-                    speed = self.target_speed
+                    # 转弯段 - 逆时针旋转90度（在车辆右侧）
+                    turning_progress = (distance - turning_start) / (trajectory_length - turning_start)
+                    turning_angle = turning_progress * math.pi/2  # 90度
+                    
+                    # 计算旋转后的位置 - 绕弧中心旋转
+                    angle = turning_angle
+                    x = arc_center_x - arc_radius * math.sin(angle)
+                    y = arc_center_y + arc_radius * math.cos(angle)
+                    
+                    # 计算朝向 - 逐渐旋转到右转90度
+                    heading = (vehicle_rotation.yaw + math.degrees(angle)) % 360
+                    
+                    # 减速转弯
+                    target_speed = max(5.0, turn_speed - 3.0 * math.sin(turning_progress * math.pi/2))
                 
-                smooth_trajectory.append((x_new[i], y_new[i], yaw, speed))
+                # 添加到轨迹模板
+                trajectory_template.append((x, y, heading, target_speed / 3.6))  # 转换为m/s
             
-            self.trajectory = smooth_trajectory
-        else:
-            self.trajectory = global_trajectory
-        
-        self.current_trajectory_index = 0
-        self.trajectory_completed = False
-        
-        return self.trajectory
+            # 保存轨迹
+            self.trajectory = trajectory_template
+            self.trajectory_index = 0
+            
+            # 强制设置右转方向盘角度
+            self.current_steering = 0.5  # 更强的右转方向
+            
+            # 打印轨迹点，确认确实是右转
+            if len(self.trajectory) > 0:
+                start_point = self.trajectory[0]
+                mid_point = self.trajectory[min(10, len(self.trajectory)-1)]
+                end_point = self.trajectory[-1]
+                
+                print(f"【右转轨迹起点】: ({start_point[0]:.2f}, {start_point[1]:.2f}), 朝向: {start_point[2]:.2f}度")
+                print(f"【右转轨迹中点】: ({mid_point[0]:.2f}, {mid_point[1]:.2f}), 朝向: {mid_point[2]:.2f}度")
+                print(f"【右转轨迹终点】: ({end_point[0]:.2f}, {end_point[1]:.2f}), 朝向: {end_point[2]:.2f}度")
+                
+                # 计算方向向量，验证是否为右转
+                dx = end_point[0] - start_point[0]
+                dy = end_point[1] - start_point[1]
+                
+                # 计算点积和叉积，判断轨迹方向
+                dot_product = forward_vector.x * dx + forward_vector.y * dy
+                cross_product = forward_vector.x * dy - forward_vector.y * dx
+                
+                if cross_product > 0:
+                    print("【MPC】验证成功：生成的是右转轨迹")
+                else:
+                    print("【MPC警告】轨迹方向验证失败，可能不是右转")
+            
+            return self.trajectory
+            
+        except Exception as e:
+            print(f"【错误】强制生成右转轨迹失败: {e}")
+            traceback.print_exc()
+            return []
     
     def solve_mpc(self, vehicle, reference_trajectory):
         """求解MPC问题
@@ -277,31 +358,36 @@ class MPCController:
             return np.array([0.0, 0.0])
     
     def get_next_trajectory_point(self):
-        """获取下一个轨迹点
-        
-        Returns:
-            轨迹点 (x, y, yaw, speed) 或 None (如果轨迹已完成)
-        """
-        if self.trajectory_completed or len(self.trajectory) == 0:
+        """获取下一个轨迹点"""
+        if self.is_trajectory_completed():
             return None
+            
+        current_point = self.trajectory[self.current_trajectory_index]
+        self.current_trajectory_index += 1
         
-        if self.current_trajectory_index < len(self.trajectory):
-            point = self.trajectory[self.current_trajectory_index]
-            self.current_trajectory_index += 1
-            return point
-        else:
+        # 如果到达轨迹末尾，标记轨迹已完成
+        if self.current_trajectory_index >= len(self.trajectory):
             self.trajectory_completed = True
-            return None
+            
+        return current_point
     
     def is_trajectory_completed(self):
         """检查轨迹是否已完成"""
-        return self.trajectory_completed
+        return self.trajectory_completed or len(self.trajectory) == 0 or self.current_trajectory_index >= len(self.trajectory)
     
     def reset_trajectory(self):
         """重置轨迹"""
         self.trajectory = []
         self.current_trajectory_index = 0
         self.trajectory_completed = True
+        print("【MPC】已重置轨迹")
+    
+    def get_remaining_trajectory(self):
+        """获取剩余的轨迹点"""
+        if self.is_trajectory_completed():
+            return []
+            
+        return self.trajectory[self.current_trajectory_index:]
     
     def get_target_point(self, vehicle, lookahead_distance=5.0):
         """获取前方指定距离处的目标点
@@ -339,6 +425,12 @@ class MPCController:
         
         return target_point
     
+    def get_steering(self):
+        """获取当前MPC计算的方向盘转角"""
+        if not hasattr(self, 'current_steering') or self.current_steering is None:
+            return 0.0
+        return self.current_steering
+    
     def visualize_trajectory(self, vehicle=None):
         """可视化轨迹
         
@@ -375,53 +467,90 @@ class MPCController:
         
         plt.savefig('trajectory.png')
         plt.close()
-        
-    def visualize_trajectory_in_carla(self, world, vehicle=None, lifetime=0.1):
-        """在CARLA环境中可视化轨迹
-        
-        Args:
-            world: CARLA世界对象
-            vehicle: 车辆对象 (可选)
-            lifetime: 可视化持续时间 (秒)
-        """
-        if len(self.trajectory) == 0:
-            print("没有轨迹可视化")
-            return
-        
-        # 获取调试帮助器
-        debug = world.debug
-        
-        # 轨迹点颜色 - 降低亮度
-        trajectory_color = carla.Color(0, 0, 150)  # 深蓝色
-        current_point_color = carla.Color(150, 0, 0)  # 深红色
-        
-        # 绘制轨迹线 - 降低线条粗细
-        for i in range(len(self.trajectory) - 1):
-            start_point = carla.Location(x=self.trajectory[i][0], y=self.trajectory[i][1], z=vehicle.get_transform().location.z + 0.2)
-            end_point = carla.Location(x=self.trajectory[i+1][0], y=self.trajectory[i+1][1], z=vehicle.get_transform().location.z + 0.2)
+    
+    def visualize_trajectory_in_carla(self, world, vehicle, lifetime=2.0):
+        """在CARLA中可视化轨迹"""
+        try:
+            if self.trajectory is None or len(self.trajectory) == 0:
+                print("【警告】没有轨迹可以可视化")
+                return
             
-            # 如果是当前轨迹点，使用红色
-            if i == self.current_trajectory_index:
-                debug.draw_line(start_point, end_point, thickness=0.1, color=current_point_color, life_time=lifetime)
-            else:
-                debug.draw_line(start_point, end_point, thickness=0.05, color=trajectory_color, life_time=lifetime)
-        
-        # 标记轨迹点 - 减少点的大小和数量
-        for i in range(0, len(self.trajectory), 5):  # 每5个点标记一次
-            location = carla.Location(x=self.trajectory[i][0], y=self.trajectory[i][1], z=vehicle.get_transform().location.z + 0.2)
+            # 获取车辆高度
+            vehicle_z = vehicle.get_location().z
             
-            # 如果是当前轨迹点，使用红色并增大尺寸
-            if i == self.current_trajectory_index:
-                debug.draw_point(location, size=0.05, color=current_point_color, life_time=lifetime)
-            else:
-                debug.draw_point(location, size=0.03, color=trajectory_color, life_time=lifetime)
+            # 轨迹颜色 - 使用更加柔和的颜色
+            trajectory_color = carla.Color(r=15, g=80, b=30, a=80)  # 更暗更透明的绿色
             
-            # 只在关键点显示序号
-            if i % 10 == 0:
-                debug.draw_string(location, str(i), draw_shadow=False, color=carla.Color(150, 150, 150), life_time=lifetime)
-        
-        # 只在关键点显示速度信息
-        for i in range(0, len(self.trajectory), 10):
-            location = carla.Location(x=self.trajectory[i][0], y=self.trajectory[i][1], z=vehicle.get_transform().location.z + 0.5)
-            speed_text = f"{self.trajectory[i][3] * 3.6:.1f}"
-            debug.draw_string(location, speed_text, draw_shadow=False, color=carla.Color(0, 150, 0), life_time=lifetime)
+            # 只显示关键轨迹点，减少视觉干扰
+            for i in range(1, len(self.trajectory), 2):  # 每隔一个点显示
+                prev_point = self.trajectory[i-1]
+                curr_point = self.trajectory[i]
+                
+                # 创建轨迹中心线，贴近地面
+                prev_loc = carla.Location(x=prev_point[0], y=prev_point[1], z=vehicle_z + 0.03)
+                curr_loc = carla.Location(x=curr_point[0], y=curr_point[1], z=vehicle_z + 0.03)
+                
+                # 使用车道线风格，但更细更暗
+                world.debug.draw_line(
+                    prev_loc, curr_loc,
+                    thickness=0.03,  # 更细的线
+                    color=trajectory_color,
+                    life_time=lifetime,
+                    persistent_lines=False
+                )
+                
+                # 在转弯点处添加箭头指示
+                if i % 6 == 0:  # 每6个点添加一个方向指示
+                    # 计算方向向量
+                    direction = carla.Vector3D(
+                        x=curr_point[0] - prev_point[0],
+                        y=curr_point[1] - prev_point[1],
+                        z=0
+                    )
+                    
+                    # 标准化方向向量
+                    length = math.sqrt(direction.x**2 + direction.y**2)
+                    if length > 0:
+                        direction.x /= length
+                        direction.y /= length
+                    
+                    # 计算垂直于方向的向量
+                    perpendicular = carla.Vector3D(
+                        x=-direction.y,
+                        y=direction.x,
+                        z=0
+                    )
+                    
+                    # 创建小型箭头
+                    center = carla.Location(x=curr_point[0], y=curr_point[1], z=vehicle_z + 0.03)
+                    
+                    # 箭头尺寸
+                    width = 0.3
+                    
+                    # 绘制简单的小箭头
+                    points = [
+                        carla.Location(
+                            x=center.x - direction.x * width * 0.5,
+                            y=center.y - direction.y * width * 0.5,
+                            z=center.z
+                        ),
+                        carla.Location(
+                            x=center.x + direction.x * width,
+                            y=center.y + direction.y * width,
+                            z=center.z
+                        )
+                    ]
+                    
+                    # 绘制箭头主干
+                    world.debug.draw_line(
+                        points[0], points[1],
+                        thickness=0.03,
+                        color=carla.Color(r=15, g=100, b=15, a=100),  # 更柔和的绿色
+                        life_time=lifetime
+                    )
+            
+            print(f"【轨迹可视化】已显示 {len(self.trajectory)} 个轨迹点，使用柔和的车道线风格")
+            
+        except Exception as e:
+            print(f"【错误】轨迹可视化失败: {e}")
+            traceback.print_exc() 

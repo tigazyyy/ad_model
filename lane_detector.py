@@ -1201,11 +1201,11 @@ class SimpleOpenCVLaneDetector:
         
         # 车道检测参数 - 调整参数以提高检测效果
         self.roi_height = 0.55  # 增加ROI区域的高度比例
-        self.min_line_length = 40  # 增加最小线段长度
-        self.max_line_gap = 25  # 增加最大线段间隙
-        self.hough_threshold = 25  # 降低霍夫变换阈值，检测更多线段
-        self.canny_low = 40  # 降低Canny边缘检测低阈值
-        self.canny_high = 120  # 降低Canny边缘检测高阈值
+        self.min_line_length = 30  # 降低最小线段长度，以检测更多的线段
+        self.max_line_gap = 20  # 降低最大线段间隙，以连接更多的线段
+        self.hough_threshold = 20  # 降低霍夫变换阈值，检测更多线段
+        self.canny_low = 30  # 降低Canny边缘检测低阈值，检测更多边缘
+        self.canny_high = 90  # 降低Canny边缘检测高阈值，检测更多边缘
         
         # 初始化ROI区域
         self._initialize_roi()
@@ -1230,10 +1230,10 @@ class SimpleOpenCVLaneDetector:
         """初始化ROI区域"""
         # 使用更宽的ROI区域，以适应更多的道路情况
         self.src_points = np.float32([
-            [480, 480],  # 左上 - 更宽的区域
-            [800, 480],  # 右上 - 更宽的区域
+            [520, 480],  # 左上 - 更宽的区域
+            [760, 480],  # 右上 - 更宽的区域
             [1200, 680], # 右下 - 扩大宽度
-            [80, 680]    # 左下 - 扩大宽度
+            [100, 680]   # 左下 - 扩大宽度
         ])
         
         # 目标点 - 鸟瞰图

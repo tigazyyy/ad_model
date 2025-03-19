@@ -123,36 +123,63 @@ class JunctionDetector:
             
             # 检查是否已在交叉路口内
             if waypoint.is_junction:
-                self.in_junction_area = True
-                self.junction_confidence = 1.0
-                self.current_junction = waypoint.get_junction()
-                self.debug_info['map_detection'] = True
-                self.debug_info['distance_to_junction'] = 0.0
-                return True, self.current_junction
+                # 获取交叉路口
+                junction = waypoint.get_junction()
+                
+                # 检查交叉路口是否有多个出口选择
+                # 获取所有可能的路径
+                exit_count = self._count_junction_exits(junction)
+                
+                # 只有当交叉路口有多个出口时才认为是真正的交叉路口
+                if exit_count > 1:
+                    self.in_junction_area = True
+                    self.junction_confidence = 1.0
+                    self.current_junction = junction
+                    self.debug_info['map_detection'] = True
+                    self.debug_info['distance_to_junction'] = 0.0
+                    print(f"检测到交叉路口，有{exit_count}个出口选择")
+                    return True, junction
+                else:
+                    print(f"当前位置虽在路口区域，但只有{exit_count}个出口，不视为交叉路口")
+                    self.in_junction_area = False
+                    self.junction_confidence = 0.0
+                    self.debug_info['map_detection'] = False
+                    return False, None
             
             # 检查前方是否有交叉路口
             min_distance = float('inf')
             junction_found = False
+            found_junction = None
             
             # 使用多个距离检查点，提高检测灵敏度
             for distance in [5.0, 10.0, 15.0, 20.0, self.junction_distance_threshold]:
                 next_waypoints = waypoint.next(distance)
                 for next_wp in next_waypoints:
                     if next_wp.is_junction:
-                        junction_found = True
-                        if distance < min_distance:
-                            min_distance = distance
-                            # 根据距离计算置信度
-                            self.junction_confidence = 1.0 - (distance / self.junction_distance_threshold)
-                            self.in_junction_area = self.junction_confidence > 0.5  # 降低阈值，原来是0.7
-                            self.current_junction = next_wp.get_junction()
+                        # 获取交叉路口
+                        junction = next_wp.get_junction()
+                        
+                        # 检查交叉路口是否有多个出口选择
+                        exit_count = self._count_junction_exits(junction)
+                        
+                        # 只有当交叉路口有多个出口时才认为是真正的交叉路口
+                        if exit_count > 1:
+                            junction_found = True
+                            if distance < min_distance:
+                                min_distance = distance
+                                found_junction = junction
+                                # 根据距离计算置信度
+                                self.junction_confidence = 1.0 - (distance / self.junction_distance_threshold)
+                                self.in_junction_area = self.junction_confidence > 0.5  # 降低阈值，原来是0.7
+                                self.current_junction = junction
             
             # 保存调试信息
             self.debug_info['map_detection'] = junction_found
             self.debug_info['distance_to_junction'] = min_distance if junction_found else float('inf')
             
             if junction_found:
-                return True, self.current_junction
+                print(f"前方{min_distance:.1f}米处有交叉路口")
+                return True, found_junction
             
             # 重置状态
             self.in_junction_area = False
@@ -164,6 +191,62 @@ class JunctionDetector:
             print(f"检测交叉路口异常: {e}")
             traceback.print_exc()
             return False, None
+    
+    def _count_junction_exits(self, junction):
+        """计算交叉路口的出口数量
+        
+        Args:
+            junction: 交叉路口对象
+            
+        Returns:
+            int: 出口数量
+        """
+        try:
+            if not junction:
+                return 0
+                
+            # 获取所有可能的路径
+            topology = self.world.get_map().get_topology()
+            
+            # 统计与当前交叉路口相关的出口数量
+            exit_count = 0
+            exit_directions = set()  # 用于记录不同的方向
+            
+            # 遍历拓扑中的所有路径
+            for wp1, wp2 in topology:
+                # 检查是否与当前交叉路口相关
+                if wp1.get_junction() == junction or wp2.get_junction() == junction:
+                    # 找到出口路径
+                    if wp1.get_junction() == junction:
+                        exit_wp = wp2
+                    else:
+                        exit_wp = wp1
+                        
+                    # 计算出口方向，四舍五入到15度的倍数以合并相似方向
+                    exit_dir = round(exit_wp.transform.rotation.yaw / 15) * 15
+                    exit_directions.add(exit_dir)
+            
+            # 使用不同方向的数量作为出口数量
+            exit_count = len(exit_directions)
+            
+            # 如果计算的出口数量为0（可能是拓扑问题），尝试使用路口的航点计算
+            if exit_count == 0:
+                waypoints = self.get_junction_waypoints(junction)
+                entry_exit_set = set()
+                
+                # 遍历所有进出口对，提取出不同的出口方向
+                for entry_wp, exit_wp in waypoints:
+                    exit_dir = round(exit_wp.transform.rotation.yaw / 15) * 15
+                    entry_exit_set.add(exit_dir)
+                
+                exit_count = len(entry_exit_set)
+            
+            return max(1, exit_count)  # 确保至少有一个出口
+            
+        except Exception as e:
+            print(f"计算交叉路口出口数量异常: {e}")
+            traceback.print_exc()
+            return 1  # 默认为单出口
     
     def is_approaching_junction(self, image=None):
         """综合判断是否接近交叉路口，结合地图和图像信息"""
